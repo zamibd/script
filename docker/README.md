@@ -6,14 +6,14 @@ This repository contains scripts to manage Docker installation and uninstallatio
 To install Docker, run the following one-liner command:
 
 ```bash
-curl -s https://github.com/zamibd/script/docker/install.sh | bash
+curl -s https://raw.githubusercontent.com/zamibd/script/main/docker/install.sh | bash
 ```
 
 ## 2. Docker Uninstallation
 To uninstall Docker, run the following one-liner command:
 
 ```bash
-curl -s https://github.com/zamibd/script/docker/uninstall.sh | bash
+curl -s https://raw.githubusercontent.com/zamibd/script/main/docker/uninstall.sh | bash
 ```
 
 ## Tested Operating Systems

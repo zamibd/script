@@ -6,21 +6,21 @@ This repository contains scripts to manage Nginx installation, uninstallation, a
 To install Nginx, run the following one-liner command:
 
 ```bash
-curl -s https://github.com/zamibd/script/nginx/install.sh | bash
+curl -s https://raw.githubusercontent.com/zamibd/script/main/nginx/install.sh | bash
 ```
 
 ## 2. Nginx Uninstallation
 To uninstall Nginx, run the following one-liner command:
 
 ```bash
-curl -s https://github.com/zamibd/script/nginx/uninstall.sh | bash
+curl -s https://raw.githubusercontent.com/zamibd/script/main/nginx/uninstall.sh | bash
 ```
 
 ## 3. Nginx with SSL
 To configure Nginx with SSL, run the following script:
 
 ```bash
-curl -s https://github.com/zamibd/script/nginx/ssl.sh | bash
+curl -s https://raw.githubusercontent.com/zamibd/script/main/nginx/ssl.sh | bash
 ```
 
 ## Tested Operating Systems

@@ -1,106 +1,93 @@
 #!/usr/bin/env bash
 set -euo pipefail
-set -o errtrace
-trap 'echo "ERROR: command failed at line $LINENO"; exit 1' ERR
 
-# -------- Ubuntu-only guard --------
-[ -f /etc/os-release ] || { echo "This script only supports Ubuntu."; exit 1; }
+# Re-run as root if needed
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  echo "[i] Root privileges required — re-running with sudo..."
+  exec sudo -E bash "$0" "$@"
+fi
+
+# Pretty log helpers
+hr() { printf '%*s\n' "${COLUMNS:-80}" '' | tr ' ' '-'; }
+ok() { echo -e "✅ $*"; }
+info() { echo -e "ℹ️  $*"; }
+err() { echo -e "❌ $*" >&2; }
+
+trap 'err "An error occurred. Check the logs above."; exit 1' ERR
+
+hr
+echo "Let's Encrypt (Certbot standalone) setup starting..."
+hr
+
+# -------- Ubuntu-only check --------
+[ -f /etc/os-release ] || { err "This script only supports Ubuntu."; exit 1; }
 . /etc/os-release
-[ "${ID,,}" = "ubuntu" ] || { echo "This script only supports Ubuntu. Detected: ${ID}"; exit 1; }
+[ "${ID,,}" = "ubuntu" ] || { err "This script only supports Ubuntu (detected: ${ID})."; exit 1; }
 
-# -------- Prompt for Domain and Email --------
-read -r -p "Enter your domain (e.g., imzami.com): " DOMAIN
-read -r -p "Enter your email for Let's Encrypt notifications: " EMAIL
+# 1) Update & install dependencies
+info "Updating package lists..."
+apt update -y
+apt install -y certbot
+ok "Certbot installed successfully."
 
-# Basic validation
-if [ -z "$DOMAIN" ]; then
-  echo "Domain is required."; exit 1;
-fi
-if [ -z "$EMAIL" ]; then
-  echo "Email is required."; exit 1;
-fi
-
-# Variables
-WWWROOT_BASE="/var/www"
-NGINX_CONF_DIR="/etc/nginx/conf.d"
-PRIMARY_DOMAIN="$DOMAIN"
-WEBROOT="${WWWROOT_BASE}/${PRIMARY_DOMAIN}"
-SERVER_BLOCK="${NGINX_CONF_DIR}/${PRIMARY_DOMAIN}.conf"
-
+# 2) Prompt for domain and email
 echo
-echo "=== Configuration ==="
-echo "Domain      : $PRIMARY_DOMAIN"
-echo "Email       : $EMAIL"
-echo "Webroot     : $WEBROOT"
-echo "Nginx conf  : $SERVER_BLOCK"
-echo
-
-# -------- Install dependencies --------
-echo "Installing prerequisites..."
-sudo apt update -y
-sudo apt install -y nginx curl ca-certificates lsb-release software-properties-common
-sudo apt install -y certbot python3-certbot-nginx
-
-# -------- Enable & start nginx --------
-sudo systemctl enable nginx
-sudo systemctl start nginx
-
-# -------- Create webroot and basic config --------
-echo "Setting up NGINX server block..."
-sudo mkdir -p "$WEBROOT"
-sudo chown -R "$USER":"$USER" "$WEBROOT" || true
-if [ ! -f "${WEBROOT}/index.html" ]; then
-  cat <<HTML | sudo tee "${WEBROOT}/index.html" >/dev/null
-<!doctype html><title>${PRIMARY_DOMAIN}</title><h1>${PRIMARY_DOMAIN} - SSL Setup</h1>
-HTML
+read -rp "Enter your domain (e.g., example.com): " DOMAIN
+DOMAIN="${DOMAIN,,}"
+if [[ -z "${DOMAIN}" ]]; then
+  err "Domain cannot be empty."; exit 1
 fi
 
-sudo tee "$SERVER_BLOCK" >/dev/null <<NGINX
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${PRIMARY_DOMAIN};
-    root ${WEBROOT};
-    index index.html;
-    location / {
-        try_files \$uri \$uri/ =404;
-    }
-}
-NGINX
+read -rp "Enter your email for Let's Encrypt notifications: " EMAIL
+if [[ -z "${EMAIL}" ]]; then
+  err "Email cannot be empty."; exit 1
+fi
 
-echo "Validating NGINX config..."
-sudo nginx -t
-sudo systemctl reload nginx
+hr
+echo "Requesting Let's Encrypt SSL certificate (standalone mode)..."
+hr
 
-# -------- Obtain SSL via Certbot --------
-echo "Requesting Let's Encrypt SSL certificate for ${PRIMARY_DOMAIN}..."
-sudo certbot --nginx -d "$PRIMARY_DOMAIN" \
-  -m "$EMAIL" --agree-tos --no-eff-email --redirect
+# 3) Stop anything using port 80 (optional, certbot will handle)
+systemctl stop nginx 2>/dev/null || true
+systemctl stop apache2 2>/dev/null || true
 
-# -------- Enable auto-renewal --------
-echo "Enabling automatic SSL renewal..."
+# 4) Request SSL certificate (HTTP-01 standalone)
+certbot certonly --standalone \
+  -d "${DOMAIN}" \
+  --agree-tos -m "${EMAIL}" \
+  --no-eff-email \
+  --non-interactive
+
+ok "SSL certificate issued successfully for ${DOMAIN}."
+
+# 5) Enable auto-renewal
+info "Enabling automatic SSL renewal..."
 if systemctl list-unit-files | grep -q '^certbot.timer'; then
-  sudo systemctl enable --now certbot.timer
+  systemctl enable --now certbot.timer
 else
-  if ! sudo crontab -l 2>/dev/null | grep -q 'certbot renew'; then
-    (sudo crontab -l 2>/dev/null; echo '0 3 * * * certbot renew --quiet --deploy-hook "systemctl reload nginx"') | sudo crontab -
+  if ! crontab -l 2>/dev/null | grep -q 'certbot renew'; then
+    (crontab -l 2>/dev/null; echo '0 3 * * * certbot renew --quiet') | crontab -
   fi
 fi
+ok "Auto-renewal enabled."
 
-# -------- Verify & finish --------
-echo
-echo "SSL certificate details:"
-sudo certbot certificates | grep -A3 "Domains:" || true
+# 6) Test dry-run renewal
+info "Testing certificate renewal (dry-run)..."
+certbot renew --dry-run
+ok "Dry-run renewal succeeded."
 
+# 7) Summary
+hr
+echo "🎉 SSL certificate for ${DOMAIN} has been installed successfully!"
 echo
-echo "Reloading NGINX..."
-sudo nginx -t
-sudo systemctl reload nginx
-
+echo "Certificate files:"
+echo "  /etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+echo "  /etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 echo
-echo "✅ SUCCESS: SSL is fully configured and active!"
-echo "Domain        : $PRIMARY_DOMAIN"
-echo "Email         : $EMAIL"
-echo "Webroot       : $WEBROOT"
-echo "Nginx conf    : $SERVER_BLOCK"
-echo "Auto-renewal  : enabled"
+echo "You can use these paths in your web server config or Docker setup."
+echo
+echo "Verify expiry date:"
+echo "  openssl x509 -in /etc/letsencrypt/live/${DOMAIN}/fullchain.pem -noout -dates"
+hr
+certbot --version
+ok "Let's Encrypt standalone setup complete!"

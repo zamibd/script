@@ -20,7 +20,10 @@ curl -s https://raw.githubusercontent.com/zamibd/script/main/nginx/uninstall.sh 
 To configure Nginx with SSL, run the following script:
 
 ```bash
-curl -s https://raw.githubusercontent.com/zamibd/script/main/nginx/ssl.sh | bash
+curl -o ssl.sh https://raw.githubusercontent.com/zamibd/script/main/nginx/ssl.sh
+chmod +x ssl.sh
+./ssl.sh
+ | bash
 ```
 
 ## Tested Operating Systems

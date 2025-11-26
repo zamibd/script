@@ -1,214 +1,93 @@
 #!/usr/bin/env bash
 set -euo pipefail
-set -o errtrace
-trap 'echo "ERROR: command failed at line $LINENO"; exit 1' ERR
 
-# --------------- Ubuntu-only guard ---------------
-[ -f /etc/os-release ] || { echo "This script only supports Ubuntu."; exit 1; }
+# Re-run as root if needed
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  echo "[i] Root privileges required — re-running with sudo..."
+  exec sudo -E bash "$0" "$@"
+fi
+
+# Pretty log helpers
+hr() { printf '%*s\n' "${COLUMNS:-80}" '' | tr ' ' '-'; }
+ok() { echo -e "✅ $*"; }
+info() { echo -e "ℹ️  $*"; }
+err() { echo -e "❌ $*" >&2; }
+
+trap 'err "An error occurred. Check the logs above."; exit 1' ERR
+
+hr
+echo "Let's Encrypt (Certbot standalone) setup starting..."
+hr
+
+# -------- Ubuntu-only check --------
+[ -f /etc/os-release ] || { err "This script only supports Ubuntu."; exit 1; }
 . /etc/os-release
-[ "${ID,,}" = "ubuntu" ] || { echo "This script only supports Ubuntu. Detected: ${ID}"; exit 1; }
+[ "${ID,,}" = "ubuntu" ] || { err "This script only supports Ubuntu (detected: ${ID})."; exit 1; }
 
-# --------------- Helpers ---------------
-prompt() {
-  # usage: prompt "Question" "default" varname
-  local q="${1:-}" def="${2:-}" varname="${3:-}"
-  local ans
-  if [ -n "$def" ]; then
-    read -r -p "$q [$def]: " ans || true
-    ans="${ans:-$def}"
-  else
-    read -r -p "$q: " ans || true
-  fi
-  printf -v "$varname" '%s' "$ans"
-}
+# 1) Update & install dependencies
+info "Updating package lists..."
+apt update -y
+apt install -y certbot
+ok "Certbot installed successfully."
 
-prompt_yn() {
-  # usage: prompt_yn "Question (y/n)" default_y|default_n varname
-  local q="${1:-}" def="${2:-default_y}" varname="${3:-}"
-  local hint="Y/n"
-  local defval="y"
-  if [ "$def" = "default_n" ]; then
-    hint="y/N"
-    defval="n"
-  fi
-  local ans
-  read -r -p "$q [$hint]: " ans || true
-  ans="${ans:-$defval}"
-  case "${ans,,}" in
-    y|yes) printf -v "$varname" '%s' "y" ;;
-    n|no)  printf -v "$varname" '%s' "n" ;;
-    *)     printf -v "$varname" '%s' "$defval" ;;
-  esac
-}
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || { echo "Missing required command: $1"; exit 1; }
-}
-
-validate_email() {
-  local e="$1"
-  [[ "$e" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
-}
-
-# --------------- Collect input (args/env or interactive) ---------------
-DOMAIN="${DOMAIN:-${1:-}}"
-EMAIL="${EMAIL:-${2:-}}"
-EXTRA_DOMAINS="${EXTRA_DOMAINS:-}"   # comma-separated
-AUTO_REDIRECT="${AUTO_REDIRECT:-}"    # y/n
-STAGING="${STAGING:-}"                # y/n
-WWWROOT_BASE="${WWWROOT_BASE:-/var/www}"
-NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx/conf.d}"
-
-if [ -z "${DOMAIN}" ]; then
-  prompt "Enter primary domain (e.g., example.com)" "" DOMAIN
-fi
-
-if [ -z "${EMAIL}" ]; then
-  prompt "Enter email for Let's Encrypt notifications" "" EMAIL
-fi
-
-if [ -z "${EXTRA_DOMAINS}" ]; then
-  prompt_yn "Also include www subdomain?" default_y ADD_WWW
-  if [ "$ADD_WWW" = "y" ]; then
-    EXTRA_DOMAINS="www.${DOMAIN}"
-  fi
-  prompt_yn "Add more domains (SAN) now?" default_n ADD_MORE
-  if [ "$ADD_MORE" = "y" ]; then
-    read -r -p "Enter additional domains (comma-separated, excluding primary): " EXTRA_INPUT || true
-    if [ -n "${EXTRA_INPUT:-}" ]; then
-      if [ -n "$EXTRA_DOMAINS" ]; then
-        EXTRA_DOMAINS="$EXTRA_DOMAINS,$EXTRA_INPUT"
-      else
-        EXTRA_DOMAINS="$EXTRA_INPUT"
-      fi
-    fi
-  fi
-fi
-
-if [ -z "${AUTO_REDIRECT}" ]; then
-  prompt_yn "Force HTTP -> HTTPS redirect?" default_y AUTO_REDIRECT
-fi
-
-if [ -z "${STAGING}" ]; then
-  prompt_yn "Use Let's Encrypt STAGING (testing, not trusted)?" default_n STAGING
-fi
-
-# Basic validations
-[ -n "$DOMAIN" ] || { echo "Domain is required."; exit 2; }
-[ -n "$EMAIL" ]  || { echo "Email is required."; exit 2; }
-validate_email "$EMAIL" || { echo "Invalid email format: $EMAIL"; exit 2; }
-
-PRIMARY_DOMAIN="$DOMAIN"
-ALL_DOMAINS="$PRIMARY_DOMAIN"
-if [ -n "$EXTRA_DOMAINS" ]; then
-  # normalize commas/spaces
-  EXTRA_DOMAINS="$(echo "$EXTRA_DOMAINS" | tr -s ' ' | tr ' ' ',' | sed 's/,,*/,/g' | sed 's/^,*//; s/,*$//')"
-  [ -n "$EXTRA_DOMAINS" ] && ALL_DOMAINS="$ALL_DOMAINS,$EXTRA_DOMAINS"
-fi
-
+# 2) Prompt for domain and email
 echo
-echo "=== Plan Summary ==="
-echo "Primary domain    : $PRIMARY_DOMAIN"
-echo "Extra domains     : ${EXTRA_DOMAINS:-none}"
-echo "Email             : $EMAIL"
-echo "Redirect HTTP->HTTPS: $([ "${AUTO_REDIRECT,,}" = "y" ] && echo enabled || echo disabled)"
-echo "Let's Encrypt env : $([ "${STAGING,,}" = "y" ] && echo STAGING/test || echo PRODUCTION)"
-echo "Webroot base      : $WWWROOT_BASE"
-echo "Nginx conf dir    : $NGINX_CONF_DIR"
-echo
-
-prompt_yn "Proceed?" default_y OKGO
-[ "$OKGO" = "y" ] || { echo "Aborted by user."; exit 0; }
-
-# --------------- Install prerequisites ---------------
-echo "Installing prerequisites..."
-sudo apt update -y
-sudo apt install -y nginx curl ca-certificates lsb-release software-properties-common
-sudo apt install -y certbot python3-certbot-nginx
-
-# Ensure required commands
-require_cmd nginx
-require_cmd certbot
-
-# Ensure NGINX is running
-sudo systemctl enable nginx
-sudo systemctl start nginx
-
-# --------------- Minimal server block (if missing) ---------------
-WEBROOT="${WWWROOT_BASE}/${PRIMARY_DOMAIN}"
-SERVER_BLOCK="${NGINX_CONF_DIR}/${PRIMARY_DOMAIN}.conf"
-
-if ! grep -Rqs "server_name .*${PRIMARY_DOMAIN}" /etc/nginx; then
-  echo "Creating minimal NGINX server block for ${PRIMARY_DOMAIN}..."
-  sudo mkdir -p "$WEBROOT"
-  sudo chown -R "$USER":"$USER" "$WEBROOT" || true
-  if [ ! -f "${WEBROOT}/index.html" ]; then
-    cat <<HTML | sudo tee "${WEBROOT}/index.html" >/dev/null
-<!doctype html><title>${PRIMARY_DOMAIN}</title><h1>${PRIMARY_DOMAIN}</h1>
-HTML
-  fi
-
-  sudo tee "$SERVER_BLOCK" >/dev/null <<NGINX
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${ALL_DOMAINS//,/ };
-    root ${WEBROOT};
-    location / { try_files \$uri \$uri/ =404; }
-}
-NGINX
+read -rp "Enter your domain (e.g., example.com): " DOMAIN
+DOMAIN="${DOMAIN,,}"
+if [[ -z "${DOMAIN}" ]]; then
+  err "Domain cannot be empty."; exit 1
 fi
 
-echo "Validating NGINX config..."
-sudo nginx -t
-sudo systemctl reload nginx
-
-# --------------- Request certificate ---------------
-CERTBOT_FLAGS=(--nginx -d "$PRIMARY_DOMAIN" -m "$EMAIL" --agree-tos --no-eff-email)
-
-IFS=',' read -r -a doms <<< "$ALL_DOMAINS"
-for d in "${doms[@]}"; do
-  if [ "$d" != "$PRIMARY_DOMAIN" ]; then
-    CERTBOT_FLAGS+=(-d "$d")
-  fi
-done
-
-if [ "${AUTO_REDIRECT,,}" = "y" ]; then
-  CERTBOT_FLAGS+=(--redirect)
+read -rp "Enter your email for Let's Encrypt notifications: " EMAIL
+if [[ -z "${EMAIL}" ]]; then
+  err "Email cannot be empty."; exit 1
 fi
 
-if [ "${STAGING,,}" = "y" ]; then
-  echo "Using Let's Encrypt STAGING (test certificates)."
-  CERTBOT_FLAGS+=(--test-cert)
-fi
+hr
+echo "Requesting Let's Encrypt SSL certificate (standalone mode)..."
+hr
 
-echo "Running Certbot..."
-sudo certbot "${CERTBOT_FLAGS[@]}"
+# 3) Stop anything using port 80 (optional, certbot will handle)
+systemctl stop nginx 2>/dev/null || true
+systemctl stop apache2 2>/dev/null || true
 
-# --------------- Enable auto-renewal ---------------
-echo "Enabling auto-renewal..."
+# 4) Request SSL certificate (HTTP-01 standalone)
+certbot certonly --standalone \
+  -d "${DOMAIN}" \
+  --agree-tos -m "${EMAIL}" \
+  --no-eff-email \
+  --non-interactive
+
+ok "SSL certificate issued successfully for ${DOMAIN}."
+
+# 5) Enable auto-renewal
+info "Enabling automatic SSL renewal..."
 if systemctl list-unit-files | grep -q '^certbot.timer'; then
-  sudo systemctl enable --now certbot.timer
+  systemctl enable --now certbot.timer
 else
-  if ! sudo crontab -l 2>/dev/null | grep -q 'certbot renew'; then
-    (sudo crontab -l 2>/dev/null; echo '0 3 * * * certbot renew --quiet --deploy-hook "systemctl reload nginx"') | sudo crontab -
+  if ! crontab -l 2>/dev/null | grep -q 'certbot renew'; then
+    (crontab -l 2>/dev/null; echo '0 3 * * * certbot renew --quiet') | crontab -
   fi
 fi
+ok "Auto-renewal enabled."
 
-# --------------- Final checks ---------------
-echo
-echo "Certificate summary:"
-sudo certbot certificates | sed -n '1,200p' || true
+# 6) Test dry-run renewal
+info "Testing certificate renewal (dry-run)..."
+certbot renew --dry-run
+ok "Dry-run renewal succeeded."
 
+# 7) Summary
+hr
+echo "🎉 SSL certificate for ${DOMAIN} has been installed successfully!"
 echo
-echo "Reloading NGINX..."
-sudo nginx -t
-sudo systemctl reload nginx
-
+echo "Certificate files:"
+echo "  /etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+echo "  /etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 echo
-echo "SUCCESS: SSL is configured."
-echo "Domains        : $ALL_DOMAINS"
-echo "Webroot        : $WEBROOT"
-echo "NGINX conf     : $SERVER_BLOCK"
-echo "Redirect       : $([ "${AUTO_REDIRECT,,}" = "y" ] && echo enabled || echo disabled)"
-echo "Auto-renewal   : enabled"
+echo "You can use these paths in your web server config or Docker setup."
+echo
+echo "Verify expiry date:"
+echo "  openssl x509 -in /etc/letsencrypt/live/${DOMAIN}/fullchain.pem -noout -dates"
+hr
+certbot --version
+ok "Let's Encrypt standalone setup complete!"

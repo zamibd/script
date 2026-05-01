@@ -22,28 +22,50 @@ echo "Starting Docker installation..."
 # ----------------- Prerequisites -----------------
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y ca-certificates curl gnupg lsb-release apt-transport-https
+apt-get install -y --no-install-recommends \
+  ca-certificates \
+  curl \
+  gnupg \
+  lsb-release
 
 # ----------------- Add Docker official GPG key -----------------
 install -m 0755 -d /etc/apt/keyrings
 if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
   echo "Importing Docker GPG key..."
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   chmod a+r /etc/apt/keyrings/docker.gpg
 fi
 
 # ----------------- Add Docker repository -----------------
 ARCH="$(dpkg --print-architecture)"
-CODENAME="${VERSION_CODENAME:-$(. /etc/os-release && echo "$VERSION_CODENAME")}"
+# VERSION_CODENAME is already set from sourcing /etc/os-release above.
+# lsb_release -cs is the real fallback for minimal systems that lack it.
+CODENAME="${VERSION_CODENAME:-$(lsb_release -cs)}"
 
-echo "Adding Docker repository..."
-echo \
-  "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${CODENAME} stable" \
-  > /etc/apt/sources.list.d/docker.list
+if [ -z "$CODENAME" ]; then
+  echo "ERROR: Could not determine Ubuntu codename. Aborting."
+  exit 1
+fi
+
+DOCKER_LIST=/etc/apt/sources.list.d/docker.list
+if [ ! -f "$DOCKER_LIST" ]; then
+  echo "Adding Docker repository for ${CODENAME}..."
+  echo \
+    "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${CODENAME} stable" \
+    > "$DOCKER_LIST"
+else
+  echo "Docker repository already configured, skipping."
+fi
 
 # ----------------- Install Docker -----------------
 apt-get update -y
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+apt-get install -y --no-install-recommends \
+  docker-ce \
+  docker-ce-cli \
+  containerd.io \
+  docker-buildx-plugin \
+  docker-compose-plugin
 
 # ----------------- Enable and start Docker service -----------------
 systemctl enable docker
@@ -53,7 +75,7 @@ systemctl start docker
 CURRENT_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
 if [ "$CURRENT_USER" != "root" ]; then
   echo "Adding user '$CURRENT_USER' to the 'docker' group..."
-  groupadd docker 2>/dev/null || true
+  groupadd docker 2>/dev/null || true   # group likely already exists post-install
   usermod -aG docker "$CURRENT_USER"
   echo "User '$CURRENT_USER' added to docker group."
   echo "You must log out and log back in (or run 'newgrp docker') to apply group changes."
